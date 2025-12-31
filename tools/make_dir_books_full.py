@@ -1,239 +1,227 @@
 #!/usr/bin/env python3
-import os, re, sys, time
+import os, re, sys, hashlib, time
+from pathlib import Path
 
-ROOTS = ["/root/logos_lrb", "/opt/logos", "/var/www/logos", "/etc/logos"]
+ROOTS = [
+    "/root/logos_lrb/configs",
+    "/root/logos_lrb/core",
+    "/root/logos_lrb/infra",
+    "/root/logos_lrb/lrb_core",
+    "/root/logos_lrb/modules",
+    "/root/logos_lrb/node",
+    "/root/logos_lrb/scripts",
+    "/root/logos_lrb/src",
+    "/root/logos_lrb/tools",
+    "/root/logos_lrb/wallet-proxy",
+    "/root/logos_lrb/www",
+    "/root/logos_lrb/www_external",
+    "/opt/logos/airdrop-api",
+    "/opt/logos/airdrop-tg-bot",
+    "/opt/logos/bin",
+    "/opt/logos/configs",
+    "/opt/logos/load",
+    "/opt/logos/wallet-proxy",
+    "/opt/logos/www",
+    "/var/www/logos/css",
+    "/var/www/logos/explorer",
+    "/var/www/logos/js",
+    "/var/www/logos/landing",
+    "/var/www/logos/wallet",
+    "/var/www/logos/wallet3",
+    "/var/www/logos/www",
+]
 
-OUT_BASE = "docs/DIR_BOOKS_FULL"
-PART_MAX = 24 * 1024 * 1024      # 24MB на part, чтобы GitHub не бесился
-FILE_MAX = 8 * 1024 * 1024       # 8MB на файл (код целиком). Тяжёлые сборки будут пропущены.
-ENCODING = "utf-8"
+OUT_ROOT = Path("docs/DIR_BOOKS_FULL_V2")
+OUT_ROOT.mkdir(parents=True, exist_ok=True)
 
-ALLOW = re.compile(r"\.(rs|py|sh|toml|yml|yaml|md|js|mjs|cjs|ts|tsx|html|css|json|ini|conf|service|txt|env|example|sample)$", re.I)
+# чтобы GitHub не ругался на 50MB рекомендованный размер — режем по 40MB
+PART_MAX = 40 * 1024 * 1024
 
+# файл, который больше PART_MAX, невозможно адекватно положить внутрь md-части
+# (иначе часть > 100MB). Поэтому такой файл помечаем как SKIPPED_TOO_BIG.
+FILE_MAX = PART_MAX
+
+ALLOW = re.compile(r"\.(rs|py|sh|toml|yml|yaml|md|js|mjs|cjs|ts|tsx|html|css|json|ini|conf|service|txt)$", re.I)
 SKIP_NAME = re.compile(r"(\.bak|\.backup|\.broken|\.old|~$|\.tmp$|\.swp$|\.sqlite3$|\.db$|\.bin$|\.tar\.xz$|\.gz$|\.zip$|\.7z$|\.png$|\.jpg$|\.jpeg$|\.webp$|\.gif$|\.pdf$)", re.I)
 
-SKIP_DIR_NAMES = {
-  ".git", "target", "node_modules", "venv", ".venv", "__pycache__", "backups", "snapshots", "data.sled.bak"
-}
+SKIP_DIR_NAMES = {".git","target","node_modules","venv",".venv","__pycache__","backups","snapshots","data.sled.bak"}
 
-# Доп. жёстко исключаем старые мегакниги/снапшоты, чтобы не тащить мусор
+# Жёстко исключаем мегакниги/снапшоты/старые книги, чтобы не тянуть мусор
 SKIP_PATH_CONTAINS = [
   "/root/logos_lrb/docs/LOGOS_",
   "/root/logos_lrb/docs/snapshots/",
   "/root/logos_lrb/docs/BOOK/",
   "/root/logos_lrb/docs/LOGOS_MONO_BOOK",
   "/root/logos_lrb/docs/LOGOS_SNAPSHOTS/",
+  "/root/logos_lrb/docs/LOGOS_MONO_BOOK_FULL",
+  "/root/logos_lrb/docs/DIR_BOOKS",
+  "/root/logos_lrb/docs/DIR_BOOKS_FULL",
 ]
 
 def safe_name(path: str) -> str:
-  s = path.strip("/").replace("/", "__")
-  s = re.sub(r"[^a-zA-Z0-9_\-\.]+", "_", s)
-  return s
+    s = path.strip("/").replace("/", "__")
+    s = re.sub(r"[^a-zA-Z0-9_\-\.]+", "_", s)
+    return s
 
-def is_binary(path: str) -> bool:
-  try:
-    with open(path, "rb") as f:
-      chunk = f.read(4096)
-    return b"\x00" in chunk
-  except Exception:
-    return True
+def is_binary_bytes(b: bytes) -> bool:
+    if b"\x00" in b:
+        return True
+    # много “непечатных” — вероятно бинарь
+    text = sum(1 for x in b if (9 <= x <= 13) or (32 <= x <= 126) or (x >= 128))
+    return text / max(1, len(b)) < 0.85
 
-def should_skip_dir(cur: str) -> bool:
-  parts = cur.split(os.sep)
-  if any(p in SKIP_DIR_NAMES for p in parts):
-    return True
-  for bad in SKIP_PATH_CONTAINS:
-    if cur.startswith(bad) or (bad in cur):
-      return True
-  return False
-
-def should_skip_file(path: str) -> bool:
-  base = os.path.basename(path)
-  if SKIP_NAME.search(base):
-    return True
-  for bad in SKIP_PATH_CONTAINS:
-    if path.startswith(bad) or (bad in path):
-      return True
-  if not ALLOW.search(base):
-    return True
-  return False
-
-def etc_sensitive(path: str) -> bool:
-  # /etc/logos — не льём приватные ключи/боевые env (их редактируем)
-  if not path.startswith("/etc/logos/"):
+def should_skip_path(p: str) -> bool:
+    for s in SKIP_PATH_CONTAINS:
+        if s in p:
+            return True
     return False
-  b = os.path.basename(path)
-  if b.endswith(".key") or b.endswith(".rid"):
-    return True
-  if b in {"keys.env", "keys.envy", "proxy.env", "wallet-proxy.env", "airdrop-api.env", "logos_tg_bot.env"}:
-    return True
-  if re.match(r"^node-.*\.env$", b or ""):
-    return True
-  if b == "node-main.env":
-    return True
-  # Разрешим example/sample, genesis.yaml и прочие явно не секретные конфиги
-  if b.endswith(".example") or b.endswith(".sample"):
+
+def is_sensitive_etc(p: str) -> bool:
+    # на всякий случай: если вдруг попадёт /etc/logos — ключи не льём
+    if not p.startswith("/etc/logos/"):
+        return False
+    base = os.path.basename(p)
+    if base.endswith(".key") or base.endswith(".rid"):
+        return True
+    if base in ("keys.env","keys.envy","node-main.env","proxy.env","wallet-proxy.env","airdrop-api.env","logos_tg_bot.env"):
+        return True
+    if re.match(r"^node-.*\.env$", base):
+        return True
+    # .env только example/sample
+    if base.endswith(".env") and not (base.endswith(".example") or base.endswith(".sample")):
+        return True
     return False
-  if b == "genesis.yaml":
-    return False
-  # остальные .env считаем чувствительными
-  if ".env" in b and not (b.endswith(".example") or b.endswith(".sample")):
-    return True
-  return False
 
-class PartWriter:
-  def __init__(self, out_dir: str, title: str):
-    self.out_dir = out_dir
-    self.title = title
-    os.makedirs(out_dir, exist_ok=True)
-    self.part_no = 1
-    self.size = 0
-    self.f = None
-    self.index_lines = []
-    self._open_new()
+def write_header(fp, title: str):
+    fp.write(f"# {title}\n\n")
+    fp.write(f"_Generated: {time.strftime('%Y-%m-%d %H:%M:%SZ', time.gmtime())}_\n\n")
 
-  def _open_new(self):
-    if self.f:
-      self.f.close()
-    name = f"part{self.part_no:03d}.md"
-    self.path = os.path.join(self.out_dir, name)
-    self.f = open(self.path, "w", encoding=ENCODING, errors="replace")
-    self.size = 0
-    self._w(f"# {self.title}\n\n")
-    self._w(f"_Generated: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}_\n\n")
-    self._w(f"**Part:** {self.part_no}\n\n---\n\n")
-    self.index_lines.append(f"- {name}")
-    self.part_no += 1
+def write_index(dir_path: str, out_dir: Path, files_all: list, skipped_big: list, skipped_bin: list):
+    idx = out_dir / "00_INDEX.md"
+    with idx.open("w", encoding="utf-8") as fp:
+        write_header(fp, "LOGOS — Directory Code Book (FULL, no truncation)")
+        fp.write(f"## ROOT: `{dir_path}`\n\n")
+        fp.write("## Files included\n\n")
+        for f in files_all:
+            fp.write(f"- `{f}`\n")
+        fp.write("\n## Skipped (too big)\n\n")
+        for f, sz in skipped_big:
+            fp.write(f"- `{f}` ({sz/1024/1024:.1f} MB) — SKIPPED_TOO_BIG\n")
+        fp.write("\n## Skipped (binary)\n\n")
+        for f in skipped_bin:
+            fp.write(f"- `{f}` — SKIPPED_BINARY\n")
+        fp.write("\n")
 
-  def _w(self, s: str):
-    self.f.write(s)
-    self.size += len(s.encode(ENCODING, errors="replace"))
-
-  def write(self, s: str):
-    bs = len(s.encode(ENCODING, errors="replace"))
-    if self.size + bs > PART_MAX:
-      self._open_new()
-    self._w(s)
-
-  def close(self):
-    if self.f:
-      self.f.close()
-
-def walk_files(root_dir: str):
-  for cur, dnames, fnames in os.walk(root_dir):
-    if should_skip_dir(cur):
-      dnames[:] = []
-      continue
-    dnames[:] = [d for d in dnames if d not in SKIP_DIR_NAMES]
-    for fn in sorted(fnames):
-      path = os.path.join(cur, fn)
-      if should_skip_file(path):
-        continue
-      yield path
-
-def write_book(dir_path: str):
-  sn = safe_name(dir_path)
-  out_dir = os.path.join(OUT_BASE, sn)
-  title = f"LOGOS — Directory Book: {dir_path}"
-
-  w = PartWriter(out_dir, title)
-
-  # STRUCTURE
-  w.write("## STRUCTURE\n\n```text\n")
-  for cur, dnames, fnames in os.walk(dir_path):
-    if should_skip_dir(cur):
-      dnames[:] = []
-      continue
-    dnames[:] = [d for d in dnames if d not in SKIP_DIR_NAMES]
-    w.write(cur + "\n")
-  w.write("```\n\n---\n\n")
-
-  skipped_large = 0
-  redacted = 0
-  included = 0
-
-  w.write("## FILES (FULL SOURCE)\n\n")
-
-  for f in walk_files(dir_path):
-    # binary?
-    if is_binary(f):
-      continue
-
-    try:
-      sz = os.path.getsize(f)
-    except Exception:
-      continue
-
-    w.write(f"\n### FILE: {f}\n\n")
-
-    if etc_sensitive(f):
-      redacted += 1
-      w.write("```text\n[REDACTED: sensitive /etc/logos file]\n```\n")
-      continue
-
-    if sz > FILE_MAX:
-      skipped_large += 1
-      w.write(f"```text\n[SKIPPED: too large ({sz} bytes)]\n```\n")
-      continue
-
-    w.write("```\n")
-    try:
-      with open(f, "r", encoding=ENCODING, errors="replace") as rf:
-        w.write(rf.read())
-    except Exception as e:
-      w.write(f"[READ ERROR: {e}]\n")
-    w.write("\n```\n")
-    included += 1
-
-  # INDEX
-  idx_path = os.path.join(out_dir, "00_INDEX.md")
-  with open(idx_path, "w", encoding=ENCODING, errors="replace") as idx:
-    idx.write(f"# INDEX — {dir_path}\n\n")
-    idx.write(f"- Included files: {included}\n")
-    idx.write(f"- Redacted: {redacted}\n")
-    idx.write(f"- Skipped large: {skipped_large}\n\n")
-    idx.write("## Parts\n")
-    idx.write("\n".join(w.index_lines) + "\n")
-
-  w.close()
-  return out_dir, included, redacted, skipped_large
+def open_part(out_dir: Path, part_no: int):
+    p = out_dir / f"part{part_no:03d}.md"
+    fp = p.open("w", encoding="utf-8")
+    return p, fp
 
 def main():
-  os.makedirs(OUT_BASE, exist_ok=True)
+    global_index = OUT_ROOT / "00_GLOBAL_INDEX.md"
+    books = []
 
-  # берём верхний уровень директорий из каждого ROOT
-  targets = []
-  for root in ROOTS:
-    if not os.path.isdir(root):
-      continue
-    for name in sorted(os.listdir(root)):
-      p = os.path.join(root, name)
-      if os.path.isdir(p):
-        # отсечём мусорные подпапки по имени
-        if name in SKIP_DIR_NAMES:
-          continue
-        # отсечём резервные папки вида *_bak*, backup_*
-        if re.search(r"(?:^\.bak|_bak|backup)", name, re.I):
-          continue
-        targets.append(p)
+    with global_index.open("w", encoding="utf-8") as gidx:
+        write_header(gidx, "LOGOS — GLOBAL DIRECTORY BOOK INDEX")
+        gidx.write("Список книг по директориям.\n\n")
 
-  # общий индекс
-  global_index = os.path.join(OUT_BASE, "00_GLOBAL_INDEX.md")
-  with open(global_index, "w", encoding=ENCODING, errors="replace") as gi:
-    gi.write("# LOGOS — FULL DIRECTORY BOOKS (clean)\n\n")
-    gi.write(f"_Generated: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}_\n\n")
-    gi.write("## Books\n\n")
-    for t in targets:
-      gi.write(f"- {t} -> {safe_name(t)}/00_INDEX.md\n")
+        for root in ROOTS:
+            if not os.path.isdir(root):
+                continue
 
-  # генерим
-  total = 0
-  for t in targets:
-    out_dir, inc, red, skl = write_book(t)
-    total += 1
-    print(f"✅ {t} -> {out_dir} | files:{inc} redacted:{red} skipped_large:{skl}")
+            book_name = safe_name(root)
+            out_dir = OUT_ROOT / book_name
+            out_dir.mkdir(parents=True, exist_ok=True)
 
-  print(f"\nDONE. Books: {total}\nOutput: {OUT_BASE}")
+            files = []
+            skipped_big = []
+            skipped_bin = []
+
+            # собираем файлы
+            for cur, dnames, fnames in os.walk(root):
+                # выкидываем мусорные dirs
+                dnames[:] = [d for d in dnames if d not in SKIP_DIR_NAMES]
+                cur_norm = cur.replace("\\", "/")
+                if any(f"/{d}/" in f"/{cur_norm}/" for d in SKIP_DIR_NAMES):
+                    dnames[:] = []
+                    continue
+
+                for n in sorted(fnames):
+                    if SKIP_NAME.search(n):
+                        continue
+                    if not ALLOW.search(n):
+                        continue
+                    p = os.path.join(cur, n).replace("\\", "/")
+                    if should_skip_path(p):
+                        continue
+                    try:
+                        sz = os.path.getsize(p)
+                    except:
+                        continue
+                    if sz > FILE_MAX:
+                        skipped_big.append((p, sz))
+                        continue
+                    # бинарь проверим небольшим чтением
+                    try:
+                        with open(p, "rb") as fb:
+                            head = fb.read(8192)
+                        if is_binary_bytes(head):
+                            skipped_bin.append(p)
+                            continue
+                    except:
+                        continue
+                    files.append(p)
+
+            # индекс и структура
+            write_index(root, out_dir, files, skipped_big, skipped_bin)
+
+            # начинаем части
+            part_no = 1
+            part_path, fp = open_part(out_dir, part_no)
+
+            fp.write(f"# FULL SOURCE — `{root}`\n\n")
+            fp.write("**No truncation.** Full file contents inside code fences.\n\n")
+
+            cur_size = fp.tell()
+
+            def rotate():
+                nonlocal part_no, fp, part_path, cur_size
+                fp.close()
+                part_no += 1
+                part_path, fp = open_part(out_dir, part_no)
+                fp.write(f"# FULL SOURCE — `{root}` (part {part_no:03d})\n\n")
+                cur_size = fp.tell()
+
+            # пишем файлы целиком
+            for f in files:
+                rel = f
+                fp.write(f"\n---\n\n## FILE: `{rel}`\n\n")
+                # язык подсветки
+                ext = Path(f).suffix.lower().lstrip(".")
+                lang = ext if ext else ""
+                fp.write(f"```{lang}\n")
+                try:
+                    with open(f, "r", encoding="utf-8", errors="replace") as fin:
+                        data = fin.read()
+                except Exception as e:
+                    data = f"[READ_ERROR] {e}\n"
+                fp.write(data)
+                if not data.endswith("\n"):
+                    fp.write("\n")
+                fp.write("```\n")
+
+                # если распухло — режем по частям (но без обрезки файлов)
+                if fp.tell() > PART_MAX:
+                    rotate()
+
+            fp.close()
+
+            # записать в глобальный индекс
+            gidx.write(f"- `{root}` -> `docs/DIR_BOOKS_FULL_V2/{book_name}/00_INDEX.md`\n")
+            books.append(book_name)
+
+    print(f"✅ DONE. Books: {len(books)}")
+    print(f"Output: {OUT_ROOT}")
 
 if __name__ == "__main__":
-  main()
+    main()
