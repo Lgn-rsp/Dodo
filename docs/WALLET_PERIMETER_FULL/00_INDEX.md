@@ -1,0 +1,9 @@
+# WALLET_PERIMETER_FULL — Index
+
+Generated: 20260113T101817Z UTC
+
+Parts: 1
+
+## Parts
+
+- WALLET_PERIMETER_FULL_part001.md
