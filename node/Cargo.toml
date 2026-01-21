@@ -1,0 +1,65 @@
+[package]
+name        = "logos_node"
+version     = "0.1.0"
+edition     = "2021"
+license     = "Apache-2.0"
+description = "LOGOS LRB node: Axum REST + archive + producer + wallet/stake"
+build       = "build.rs"
+
+# Основной бинарь узла
+[[bin]]
+name = "logos_node"
+path = "src/main.rs"
+
+[lib]
+name = "logos_node"
+path = "src/lib.rs"
+
+[dependencies]
+# базовый стек (всё из workspace)
+axum.workspace                = true
+tower.workspace               = true
+tower-http.workspace          = true
+tokio.workspace               = true
+
+serde.workspace               = true
+serde_json.workspace          = true
+anyhow.workspace              = true
+thiserror.workspace           = true
+once_cell.workspace           = true
+dashmap.workspace             = true
+tracing.workspace             = true
+tracing-subscriber.workspace  = true
+sha2.workspace                = true   # canonical_msg в API
+
+# хранилища/индексация
+sled.workspace                = true
+deadpool-postgres.workspace   = true
+tokio-postgres.workspace      = true
+rusqlite.workspace            = true
+r2d2_sqlite.workspace         = true
+
+# утилиты/крипта/метрики
+hex.workspace                 = true
+base64.workspace              = true
+bs58.workspace                = true
+ed25519-dalek.workspace       = true
+blake3.workspace              = true
+ipnet.workspace               = true
+prometheus.workspace          = true
+uuid.workspace                = true
+
+# security & utils
+hmac = { version = "0.12", default-features = false }
+rand = { version = "0.8", features = ["std","std_rng"] }
+parking_lot = "0.12"
+
+# HTTP‑клиент (bridge payout + утилиты)
+reqwest   = { workspace = true, features = ["rustls-tls","http2","json","blocking"] }
+rand_core = "0.6"
+
+# ядро
+lrb_core = { path = "../lrb_core" }
+
+[build-dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

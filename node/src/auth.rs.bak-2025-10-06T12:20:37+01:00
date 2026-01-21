@@ -1,0 +1,101 @@
+//! Auth: bridge key + HMAC + anti-replay + admin gate (production)
+use anyhow::{anyhow, Context, Result};
+use axum::http::HeaderMap;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use sled::Db;
+use std::time::{Duration, SystemTime};
+use hex;
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Проверяем, что секреты заданы и не «дефолтные»
+pub fn assert_secrets_on_start() -> Result<()> {
+    let bad = ["", "change_me", "changeme", "default", "dev_secret", "supersecret"];
+    for k in ["LRB_WALLET_HMAC_KEY", "LRB_BRIDGE_KEY", "LRB_ADMIN_KEY"] {
+        let v = std::env::var(k).context(format!("{} not set", k))?;
+        if bad.iter().any(|b| v.eq_ignore_ascii_case(b)) {
+            return Err(anyhow!("{} has weak value", k));
+        }
+    }
+    Ok(())
+}
+
+/// Минимальная админ-проверка: заголовок `X-Admin-Key`
+pub fn require_admin(headers: &HeaderMap) -> Result<()> {
+    if let Ok(expect) = std::env::var("LRB_ADMIN_KEY") {
+        let got = headers
+            .get("X-Admin-Key")
+            .ok_or_else(|| anyhow!("missing X-Admin-Key"))?
+            .to_str()
+            .context("bad admin key encoding")?;
+        if got != expect {
+            return Err(anyhow!("forbidden: bad admin key"));
+        }
+    }
+    Ok(())
+}
+
+/// Явная проверка bridge-ключа (например, на защищённых ручках)
+pub fn require_bridge_key(headers: &HeaderMap) -> Result<()> {
+    let expect = std::env::var("LRB_BRIDGE_KEY").context("LRB_BRIDGE_KEY")?;
+    let got = headers
+        .get("X-Bridge-Key")
+        .ok_or_else(|| anyhow!("missing X-Bridge-Key"))?
+        .to_str()
+        .context("bad X-Bridge-Key")?;
+    if got != expect {
+        return Err(anyhow!("forbidden: bad bridge key"));
+    }
+    Ok(())
+}
+
+/// Верификация HMAC + анти-реплей через sled.
+/// Заголовки:
+/// - X-Bridge-Nonce: уникальный nonce (строка)
+/// - X-Bridge-Sign: hex(HMAC_SHA256(key, body))
+/// - (опц.) X-Bridge-Key: явный ключевой заголовок, если требуется
+pub fn verify_hmac_and_nonce(headers: &HeaderMap, body: &[u8], db: &Db) -> Result<()> {
+    // 1) ключ
+    let key = std::env::var("LRB_WALLET_HMAC_KEY")
+        .or_else(|_| std::env::var("LRB_BRIDGE_KEY"))
+        .context("HMAC key env not set")?;
+    let key_bytes = key.as_bytes();
+
+    // 2) заголовки
+    let nonce = headers
+        .get("X-Bridge-Nonce")
+        .ok_or_else(|| anyhow!("missing X-Bridge-Nonce"))?
+        .to_str()
+        .context("bad nonce")?;
+    let sign_hex = headers
+        .get("X-Bridge-Sign")
+        .ok_or_else(|| anyhow!("missing X-Bridge-Sign"))?
+        .to_str()
+        .context("bad sign")?;
+    let sign_bytes = hex::decode(sign_hex).context("sign hex")?;
+
+    // 3) анти-реплей (sled)
+    // ключ вида n:{nonce}, значение — unix_ts сек (для обслуживания TTL в будущем)
+    let tree = db.open_tree("bridge.replay")?;
+    let replay_key = format!("n:{}", nonce);
+    if tree.get(&replay_key)?.is_some() {
+        return Err(anyhow!("replay"));
+    }
+
+    // 4) HMAC(body)
+    let mut mac = HmacSha256::new_from_slice(key_bytes).context("new hmac")?;
+    mac.update(body);
+    mac.verify_slice(&sign_bytes).map_err(|_| anyhow!("bad signature"))?;
+
+    // 5) помечаем nonce как использованный
+    let ts = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or(Duration::from_secs(0))
+        .as_secs()
+        .to_be_bytes();
+    tree.insert(replay_key.as_bytes(), &ts)?;
+    // прим: очистку/TTL можно выполнять в отдельном фоне
+
+    Ok(())
+}

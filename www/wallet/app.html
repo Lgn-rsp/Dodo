@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>LOGOS Wallet</title>
+  <link rel="stylesheet" href="./ui.css"/>
+  <script src="./api_base.js"></script>
+  <script src="./common.js"></script>
+</head>
+<body>
+  <div class="container">
+    <div class="topbar">
+      <div class="brand">
+        <div class="logo"></div>
+        <div>
+          <div class="h1">LOGOS Wallet</div>
+          <div class="muted">Web MVP · Assets / Send / History / Staking / Settings</div>
+        </div>
+      </div>
+      <div class="row" style="justify-content:flex-end">
+        <div class="pill mono copy" id="ridPill" title="Клик — копировать RID">RID: …</div>
+        <div class="pill copy" id="themeBtn">Theme</div>
+        <div class="pill copy" id="logoutBtn">Logout</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="kv">
+        <div>NODE API</div><div class="mono" id="nodeApi">—</div>
+        <div>WALLET API</div><div class="mono" id="walletApi">—</div>
+        <div>HEAD</div><div class="mono" id="head">—</div>
+        <div>LGN Balance</div><div class="mono" id="bal">—</div>
+        <div>Nonce</div><div class="mono" id="nonce">—</div>
+      </div>
+      <div class="toast" id="toast"></div>
+
+      <div class="footerNav">
+        <div class="navbar">
+          <div class="navbtn active" data-tab="assets">Главная</div>
+          <div class="navbtn" data-tab="send">Отправить</div>
+          <div class="navbtn" data-tab="history">История</div>
+          <div class="navbtn" data-tab="staking">Стейкинг</div>
+          <div class="navbtn" data-tab="settings">Настройки</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid" style="margin-top:12px">
+      <div class="card" id="tab-assets">
+        <h2>Активы</h2>
+        <div class="muted">LGN всегда первый. В этом MVP показываем LGN (и основу под мультиактив).</div>
+        <hr/>
+        <div class="row">
+          <button class="btn2" id="btnRefresh">Обновить</button>
+          <button class="btn2" id="btnCopyRID">Копировать RID</button>
+        </div>
+      </div>
+
+      <div class="card hidden" id="tab-send">
+        <h2>Отправить LGN</h2>
+        <div class="muted">Транзакция подписывается локально (Ed25519). Сервер не знает ваш приватный ключ.</div>
+        <hr/>
+        <label class="muted">Кому (RID)</label>
+        <input class="input mono" id="toRid" placeholder="RID получателя"/>
+        <label class="muted" style="margin-top:10px;display:block">Сумма</label>
+        <input class="input" id="amount" placeholder="например 1.23"/>
+        <label class="muted" style="margin-top:10px;display:block">Nonce (авто)</label>
+        <input class="input mono" id="nonceIn" placeholder="авто" />
+        <div class="row" style="margin-top:10px">
+          <button class="btn" id="btnSend">Подписать и отправить</button>
+        </div>
+        <div class="toast" id="toastSend"></div>
+      </div>
+
+      <div class="card hidden" id="tab-history">
+        <h2>История</h2>
+        <div class="muted">Берём из node-api (archive/history если включено).</div>
+        <hr/>
+        <button class="btn2" id="btnHist">Загрузить</button>
+        <pre class="mono small" id="histBox" style="white-space:pre-wrap"></pre>
+      </div>
+
+      <div class="card hidden" id="tab-staking">
+        <h2>Стейкинг</h2>
+        <div class="muted">MVP: my / delegate / undelegate / claim.</div>
+        <hr/>
+        <button class="btn2" id="btnStakeMy">Мой стейк</button>
+        <pre class="mono small" id="stakeBox" style="white-space:pre-wrap"></pre>
+      </div>
+
+      <div class="card hidden" id="tab-settings">
+        <h2>Настройки</h2>
+        <div class="muted">Тема, безопасность, экспорт/импорт, диагностика.</div>
+        <hr/>
+        <div class="row">
+          <button class="btn2" id="btnExport">Backup Code</button>
+          <button class="btn2" id="btnLock">Заблокировать</button>
+        </div>
+        <div class="toast" id="toastSet"></div>
+      </div>
+    </div>
+  </div>
+
+<script src="./app.js"></script>
+</body>
+</html>

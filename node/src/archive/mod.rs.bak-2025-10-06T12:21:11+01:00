@@ -1,0 +1,226 @@
+//! Postgres archive backend with batch insert & sane typing
+use anyhow::{Context, Result};
+use deadpool_postgres::{Manager, Pool};
+use serde::Serialize;
+use tokio_postgres::{types::ToSql, Config, NoTls, Row};
+
+#[derive(Clone)]
+pub struct Archive {
+    pub(crate) pool: Pool,
+}
+
+impl Archive {
+    pub async fn new_from_env() -> Option<Self> {
+        let url = std::env::var("LRB_ARCHIVE_URL").ok()?;
+        let cfg: Config = url.parse().ok()?; // postgres://user:pass@host:port/db
+        let mgr = Manager::new(cfg, NoTls);
+        let pool = Pool::builder(mgr).max_size(16).build().ok()?;
+        Some(Archive { pool })
+    }
+
+    pub async fn record_tx(
+        &self,
+        txid: &str,
+        height: u64,
+        from: &str,
+        to: &str,
+        amount: u64,
+        nonce: u64,
+        epoch_ts: Option<u64>,
+    ) -> Result<()> {
+        let client = self.pool.get().await?;
+        let stmt = client
+            .prepare_cached(
+                "insert into txs (txid,height,from_rid,to_rid,amount,nonce,ts)
+                 values ($1,$2,$3,$4,$5,$6,to_timestamp($7))
+                 on conflict (txid) do nothing",
+            )
+            .await?;
+        let h = height as i64;
+        let a = amount as i64;
+        let n = nonce as i64;
+        let ts = epoch_ts.map(|v| v as i64);
+
+        let params: &[&(dyn ToSql + Sync)] = &[&txid, &h, &from, &to, &a, &n, &ts];
+        client.execute(&stmt, params).await?;
+        Ok(())
+    }
+
+    /// Batch-ingest без проблем с лайфтаймами (владеем строками)
+    pub async fn record_txs_batch(
+        &self,
+        rows: &[(String, u64, String, String, u64, u64, Option<u64>)],
+    ) -> Result<()> {
+        use std::time::Duration;
+        let client = self.pool.get().await?;
+        let depth = rows.len() as i64;
+
+        let stmt = client
+            .prepare_cached(
+                "insert into txs (txid,height,from_rid,to_rid,amount,nonce,ts)
+                 values ($1,$2,$3,$4,$5,$6,to_timestamp($7))
+                 on conflict (txid) do nothing",
+            )
+            .await?;
+
+        for chunk in rows.chunks(500) {
+            for r in chunk {
+                let h = r.1 as i64;
+                let a = r.4 as i64;
+                let n = r.5 as i64;
+                let ts: Option<i64> = r.6.map(|v| v as i64);
+                let params: &[&(dyn ToSql + Sync)] = &[&r.0, &h, &r.2, &r.3, &a, &n, &ts];
+                client.execute(&stmt, params).await?;
+            }
+            if chunk.len() == 500 {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }
+
+        crate::metrics::set_archive_queue(depth);
+        Ok(())
+    }
+
+    pub async fn history_by_rid(
+        &self,
+        rid: &str,
+        limit: i64,
+        before: Option<i64>,
+    ) -> Result<Vec<TxRecord>> {
+        let client = self.pool.get().await?;
+        let stmt = client
+            .prepare_cached(
+                "select txid,height,from_rid,to_rid,amount,nonce,extract(epoch from ts)::bigint as ts
+                 from txs
+                 where (from_rid=$1 or to_rid=$1)
+                   and ($2::bigint is null or height<$2)
+                 order by height desc
+                 limit $3",
+            )
+            .await?;
+        let params: &[&(dyn ToSql + Sync)] = &[&rid, &before, &limit];
+        let rows = client.query(&stmt, params).await?;
+        Ok(rows.into_iter().map(TxRecord::from_row).collect())
+    }
+
+    pub async fn tx_by_id(&self, txid: &str) -> Result<Option<TxRecord>> {
+        let client = self.pool.get().await?;
+        let stmt = client
+            .prepare_cached(
+                "select txid,height,from_rid,to_rid,amount,nonce,extract(epoch from ts)::bigint as ts
+                 from txs where txid=$1",
+            )
+            .await?;
+        let rows = client.query(&stmt, &[&txid]).await?;
+        Ok(rows.into_iter().next().map(TxRecord::from_row))
+    }
+
+    pub async fn recent_blocks(
+        &self,
+        limit: i64,
+        before: Option<i64>,
+    ) -> Result<Vec<BlockRow>> {
+        let client = self.pool.get().await?;
+        let stmt = client
+            .prepare_cached(
+                "select height,hash,extract(epoch from ts)::bigint as ts, tx_count
+                 from blocks
+                 where ($1::bigint is null or height<$1)
+                 order by height desc
+                 limit $2",
+            )
+            .await?;
+        let params: &[&(dyn ToSql + Sync)] = &[&before, &limit];
+        let rows = client.query(&stmt, params).await?;
+        Ok(rows.into_iter().map(BlockRow::from_row).collect())
+    }
+
+    pub async fn recent_txs(
+        &self,
+        limit: i64,
+        rid: Option<&str>,
+        before_ts: Option<i64>,
+    ) -> Result<Vec<TxRecord>> {
+        let client = self.pool.get().await?;
+        let (stmt, params): (_, Vec<&(dyn ToSql + Sync)>) = if let Some(r) = rid {
+            let s = client
+                .prepare_cached(
+                    "select txid,height,from_rid,to_rid,amount,nonce,extract(epoch from ts)::bigint as ts
+                     from txs
+                     where (from_rid=$1 or to_rid=$1)
+                       and ($2::bigint is null or extract(epoch from ts)::bigint < $2)
+                     order by ts desc
+                     limit $3",
+                )
+                .await?;
+            (s, vec![&r, &before_ts, &limit])
+        } else {
+            let s = client
+                .prepare_cached(
+                    "select txid,height,from_rid,to_rid,amount,nonce,extract(epoch from ts)::bigint as ts
+                     from txs
+                     where ($1::bigint is null or extract(epoch from ts)::bigint < $1)
+                     order by ts desc
+                     limit $2",
+                )
+                .await?;
+            (s, vec![&before_ts, &limit])
+        };
+        let rows = client.query(&stmt, &params).await?;
+        Ok(rows.into_iter().map(TxRecord::from_row).collect())
+    }
+
+    pub async fn block_by_height(&self, h: i64) -> Result<Option<BlockRow>> {
+        let client = self.pool.get().await?;
+        let stmt = client
+            .prepare_cached(
+                "select height,hash,extract(epoch from ts)::bigint as ts, tx_count
+                 from blocks where height=$1",
+            )
+            .await?;
+        let rows = client.query(&stmt, &[&h]).await?;
+        Ok(rows.into_iter().next().map(BlockRow::from_row))
+    }
+}
+
+#[derive(Serialize)]
+pub struct BlockRow {
+    pub height: i64,
+    pub hash: String,
+    pub ts: i64,
+    pub tx_count: i64,
+}
+impl BlockRow {
+    fn from_row(r: Row) -> Self {
+        Self {
+            height: r.get(0),
+            hash: r.get(1),
+            ts: r.get(2),
+            tx_count: r.get(3),
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct TxRecord {
+    pub txid: String,
+    pub height: i64,
+    pub from: String,
+    pub to: String,
+    pub amount: i64,
+    pub nonce: i64,
+    pub ts: i64,
+}
+impl TxRecord {
+    fn from_row(r: Row) -> Self {
+        Self {
+            txid: r.get(0),
+            height: r.get(1),
+            from: r.get(2),
+            to: r.get(3),
+            amount: r.get(4),
+            nonce: r.get(5),
+            ts: r.get(6),
+        }
+    }
+}
